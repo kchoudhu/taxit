@@ -83,3 +83,50 @@ class TaxRates(object):
                 [80001,   496600,    15],
                 [496601,  999999999, 20],
             ], columns=['start', 'end', 'rate'])
+
+
+class TaxableRoot(object):
+
+    pass
+
+
+class Family(TaxableRoot):
+
+    def __init__(self, name):
+
+        self.name = name
+
+        self.parents  = {}
+        self.children = {}
+
+    @property
+    def members(self):
+
+        return {**self.parents, **self.children}
+
+
+    def add_parent(self, parent):
+
+        if parent.name not in self.parents:
+            self.parents[parent.name] = parent
+
+        return self
+
+    def add_child(self, child):
+
+        if child.name not in self.children:
+            self.children[child.name] = child
+
+        return self
+
+
+class Person(TaxableRoot):
+
+    def __init__(self, name, child=False, married_to=None, parent=None):
+
+        self.name = name
+
+
+    def __repr__(self):
+
+        return f"<{self.__class__.__module__}.{self.__class__.__name__} at {hex(id(self))}: {self.name}>"
