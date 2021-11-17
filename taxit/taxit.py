@@ -8,8 +8,62 @@ __all__ = [
 import pandas as pd
 from taxit.helpers import classproperty
 
-class TaxingEntity(object):
+class Account(object):
 
+    def __init__(self, name, account_type=None, affiliated_with=None):
+
+        repr_name = name
+        if affiliated_with is not None:
+            repr_name = f"{repr_name}_{affiliated_with.name.lower().replace(' ', '_')}"
+        self.name = repr_name
+
+        self.account_type = account_type
+
+        self.affiliated_with = affiliated_with
+
+        self.grid = pd.DataFrame([], columns=['description', 'amount'])
+
+
+    def __repr__(self):
+
+        return f"<{self.__module__}.{self.__class__.__name__} at {hex(id(self))}: {self.name}>"
+
+
+    def __str__(self):
+
+        return str(self.grid)
+
+
+class TaxableRoot(object):
+
+    def __init__(self, name, taxed_by):
+
+        self.name = name
+
+        self.accounts = {}
+
+        self.add_account('general')
+
+        for taxing_entity in taxed_by:
+            self.add_account(taxing_entity.name)
+
+
+    def add_account(self, account_name, account_type=None, affiliated_with=None):
+
+        account = Account(account_name, account_type=account_type, affiliated_with=affiliated_with)
+        self.accounts[account.name] = account
+
+
+    def transfer(self, from_account, to, to_account, amount, description=None):
+
+        self.accounts[from_account].grid.loc[-1] = [description, -amount]
+        self.accounts[from_account].grid.index += 1
+
+        to.accounts[to_account].grid.loc[-1] = [description, amount]
+        to.accounts[to_account].grid.index += 1
+
+
+class TaxingEntity(TaxableRoot):
 
     class US_Rates(object):
 
@@ -95,34 +149,16 @@ class TaxingEntity(object):
 
     def __init__(self, jurisdiction):
 
-        self.jurisdiction = jurisdiction
+        super().__init__(jurisdiction, [])
 
         self.schedule = {
-            'USA' : self.US_Rates
-        }[self.jurisdiction]
+            'usa' : self.US_Rates
+        }[self.name]
 
 
     def __repr__(self):
 
-        return f"<{self.__module__}.{self.__class__.__name__} at {hex(id(self))}: {self.jurisdiction}>"
-
-
-    def create_account(self, taxable_entity):
-
-        print(f"Creating account with [{self.jurisdiction}] for [{taxable_entity.name}]")
-
-
-class TaxableRoot(object):
-
-
-    def __init__(self, name, taxed_by):
-
-        self.name = name
-
-        # Create an account for this TaxableEntity
-        # in each taxed_by
-        for entity in taxed_by:
-            entity.create_account(self)
+        return f"<{self.__module__}.{self.__class__.__name__} at {hex(id(self))}: {self.name}>"
 
 
 class Family(TaxableRoot):
@@ -164,19 +200,16 @@ class Family(TaxableRoot):
 
 class Person(TaxableRoot):
 
-    def __init__(self, name, is_child=False, taxed_by=[]):
-
-        self.name = name
-        self.is_child = is_child
+    def __init__(self, name, family=None, is_child=False, taxed_by=[], f_eie=False, f_housing=False):
 
         super().__init__(name, taxed_by)
 
-
-    def works_at(self, company):
-
-        self.employer = company
-
-        return self
+        self.is_child = is_child
+        if family is not None:
+            if is_child is True:
+                family.add_child(self)
+            else:
+                family.add_parent(self)
 
 
     def __repr__(self):
@@ -188,28 +221,43 @@ class Company(TaxableRoot):
 
     def __init__(self, name, taxed_by=[], owned_by={}):
 
-        self.name = name
-
-        self.ownership = owned_by
-
         super().__init__(name, taxed_by)
 
+        self.ownership = owned_by
+        self.employees = {}
 
-    def pay_salary(self, amount):
+
+    def __repr__(self):
+
+        return f"<{self.__class__.__module__}.{self.__class__.__name__} at {hex(id(self))}: {self.name}>"
+
+
+    def employs(self, person, _401k=False, child_care=False):
+
+        self.employees[person.name] = person
+
+        if _401k is True:
+            person.add_account('401k', account_type='401k', affiliated_with=self)
+
+        if child_care is True:
+            person.add_account('child_care', affiliated_with=self)
+
+
+    def pay_contract(self, to, amount):
+
+        self.transfer('general', to, 'general', amount, description='contract')
+
+
+    def pay_salary(self, to, amount, _401k=0):
 
         pass
 
 
-    def pay_profit_share(self, amount, percentage):
+    def share_profits(self, to, amount, percentage):
 
         pass
 
 
-    def pay_dividend(self):
-
-        pass
-
-
-    def receive_income(self):
+    def pay_dividends(self):
 
         pass
