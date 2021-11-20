@@ -39,6 +39,23 @@ class Account(object):
         return str(self.grid)
 
 
+    def __add__(self, b):
+
+        return self.__radd__(b)
+
+
+    def __radd__(self, b):
+
+        acct = Account('tmp')
+
+        if type(b)!=int:
+            acct.grid = self.grid.append(b.grid)
+        else:
+            acct.grid = self.grid.copy(deep=True)
+
+        return acct
+
+
 class TaxableRoot(object):
 
     def __init__(self, name, taxed_by):
