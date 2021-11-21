@@ -68,9 +68,13 @@ class TaxableRoot(object):
 
         for taxing_entity in taxed_by:
 
-            self.rates = taxing_entity.rates
+            self.rates = taxing_entity.rate_schedule(for_entity=self)
 
             self.add_account(taxing_entity.accounts['general'], name=taxing_entity.name)
+
+
+    @property
+    def marital_status(self): return 'single'
 
 
     def add_account(self, account, name=None, account_type=[], affiliated_with=None, generate_name=False):
@@ -103,9 +107,31 @@ class TaxingEntity(TaxableRoot):
         All rates 2021
         """
 
-        def __init__(self, marital_status='single'):
+        def __init__(self, for_entity=None, year=2020):
 
-            self.marital_status=marital_status
+            self.entity = for_entity
+
+            self.year = year
+
+            if self.entity is not None:
+                self.marital_status=self.entity.marital_status
+            else:
+                self.marital_status='single'
+
+
+        @property
+        def max_401k(self):
+
+            df = pd.DataFrame([
+                19500,
+                38500,
+                58000
+            ], columns=['amount'])
+
+            df.index = ['employee', 'employer', 'total']
+
+            return df
+
 
         @property
         def federal(self):
@@ -178,6 +204,7 @@ class TaxingEntity(TaxableRoot):
             else:
                 return self.medicare_employee
 
+
         @property
         def cap_gains_long(self):
 
@@ -198,30 +225,37 @@ class TaxingEntity(TaxableRoot):
 
         def apply(self, amount, schedule, table=False):
 
+            w2_so_far = self.entity.highwater('w2', account='general')
+
+            new_taxable_amount = w2_so_far + amount
+
             df = getattr(self, schedule)
 
-            ind = df.index[(df['start'] < amount) & (amount < df['end'])]
-            df.loc[ind, 'amount'] = amount-df.loc[ind, 'start']
+            ind = df.index[(df['start'] < new_taxable_amount) & (amount < df['end'])]
+            df.loc[ind, 'amount'] = new_taxable_amount-df.loc[ind, 'start']
 
-            ind = df.index[amount > (df['end'])]
+            ind = df.index[new_taxable_amount > (df['end'])]
             df.loc[ind, 'amount'] = df.loc[ind, 'end']-df.loc[ind, 'start']
 
-            ind = df.index[df['start'] > amount]
+            ind = df.index[df['start'] > new_taxable_amount]
             df.loc[ind, 'amount'] = 0
-
 
             df['tax'] = df['amount']*df['rate']/100
 
-            return df if table is True else sum(df['tax'])
+            schedule_so_far = self.entity.highwater(schedule)
+
+            return df if table is True else sum(df['tax'])-schedule_so_far
 
 
     def __init__(self, jurisdiction):
 
         super().__init__(jurisdiction, [])
 
-        self.rates = {
+        self.rate_schedule = {
             'usa' : self.US_Rates
-        }[self.name]()
+        }[jurisdiction]
+
+        self.rates = self.rate_schedule()
 
 
     def __repr__(self):
@@ -292,9 +326,11 @@ class Person(TaxableRoot):
 
     def find_account(self, affiliated_with, account_type):
 
-        for acct_name, acct in self.accounts.items():
-            if acct.affiliated_with==affiliated_with and account_type in acct.account_type:
-                return acct
+        if affiliated_with is None:
+            return [acct for acct in self.accounts.values() if (account_type in acct.account_type)]
+        else:
+            x = [acct for acct in self.accounts.values() if (acct.affiliated_with==affiliated_with and account_type in acct.account_type)]
+            return None if len(x)==0 else x[0]
 
 
     @property
@@ -322,6 +358,17 @@ class Person(TaxableRoot):
                 accts[acct_name] = acct
 
         return accts
+
+
+    def highwater(self, measure, account='usa'):
+
+        df = self.accounts[account].grid
+
+        df = df[(df['description']==measure) & (df['for_benefit_of']==self.name)]
+
+        # Return abs here -- we may be referring to
+        # negative flows
+        return abs(df['amount'].sum())
 
 
 class Company(TaxableRoot):
@@ -360,39 +407,53 @@ class Company(TaxableRoot):
 
     def pay_salary(self, to, amount, _403b=0, _403b_match=0, _401k=0, _401k_match=0, child_care=0):
 
-        # Deposit salary
-        self.transfer('general', to.accounts['general'], amount, description='salary', for_benefit_of=to)
-
         # Employer FICA
-        employer_ssi = self.rates.apply(amount, 'ssi')
-        employer_mc = self.rates.apply(amount, 'medicare_employer')
+        employer_ssi = to.rates.apply(amount, 'ssi')
+        employer_mc  = to.rates.apply(amount, 'medicare_employer')
         self.transfer('general', self.accounts['usa'], employer_ssi, description='ssi', for_benefit_of=to)
-        self.transfer('general', self.accounts['usa'], employer_mc, description='medicare', for_benefit_of=to)
+        self.transfer('general', self.accounts['usa'], employer_mc, description='medicare_employer', for_benefit_of=to)
 
         # Employee FICA
         employee_ssi = employer_ssi
-        employee_mc = employer_mc = self.rates.apply(amount, 'medicare_employee')
+        employee_mc = to.rates.apply(amount, 'medicare_employee')
         to.transfer('general', to.accounts['usa'], employee_ssi, description='ssi', for_benefit_of=to)
-        to.transfer('general', self.accounts['usa'], employer_mc, description='medicare', for_benefit_of=to)
+        to.transfer('general', self.accounts['usa'], employee_mc, description='medicare_employee', for_benefit_of=to)
 
-        taxable_salary = amount-_403b-_401k-child_care
+        # Deposit salary
+        self.transfer('general', to.accounts['general'], amount, description='w2', for_benefit_of=to)
+
+        # Add money to 403b if any
         account_403b = to.find_account(self, '403b')
-        if _403b>0:
-            to.transfer('general', account_403b, _403b, description=f'403b contribution', for_benefit_of=to)
+        if account_403b is not None:
+            if _403b>0:
+                to.transfer('general', account_403b, _403b, description=f'403b contribution', for_benefit_of=to)
 
-        if _403b_match>0:
-            self.transfer('general', account_403b, _403b_match, description=f'403b employer match', for_benefit_of=to)
+            if _403b_match>0:
+                self.transfer('general', account_403b, _403b_match, description=f'403b employer match', for_benefit_of=to)
 
-        if _401k>0:
-            account_401k = to.find_account(self, '401k')
-            to.transfer('general', account_401k, _401k, description=f'401k contribution', for_benefit_of=to)
+        # 403b is poison -- it reduces the available tax space
+        # for all pre-tax accounts to that of one employer space
+        max_retirement = to.rates.max_401k.loc['total'].amount
+        value_403b = sum(to.find_account(None, '403b')).value
+        if value_403b>0:
+            max_retirement -= sum(to.retirement_accounts.values()).value
 
-        if _401k_match>0:
-            self.transfer('general', account_401k, _401k_match, description=f'401k employer match', for_benefit_of=to)
+        account_401k = to.find_account(self, '401k')
+        if account_401k is not None:
 
-        if child_care>0:
-            account_child_care = to.find_account(self, 'child_care')
-            to.transfer('general', account_child_care, child_care, description=f'Childcare FSA contribution', for_benefit_of=to)
+            if max_retirement<(_401k+_401k_match):
+                raise Exception(f"401k contribution {_401k+_401k_match} is greater than remaining retirement space {max_retirement}")
+
+            if _401k>0:
+                to.transfer('general', account_401k, _401k, description=f'401k contribution', for_benefit_of=to)
+
+            if _401k_match>0:
+                self.transfer('general', account_401k, _401k_match, description=f'401k employer match', for_benefit_of=to)
+
+        account_child_care = to.find_account(self, 'child_care')
+        if account_child_care is not None:
+            if child_care>0:
+                to.transfer('general', account_child_care, child_care, description=f'Childcare FSA contribution', for_benefit_of=to)
 
 
     def share_profits(self, to, amount, percentage):
