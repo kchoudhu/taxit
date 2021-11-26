@@ -14,7 +14,7 @@ class Account(object):
 
         repr_name = name
         if generate_name is True:
-            repr_name = f"{repr_name}_{affiliated_with.name.lower().replace(' ', '_')}"
+            repr_name = f"{affiliated_with.name.lower().replace(' ', '_')}.{repr_name}"
         self.name = repr_name
 
         self.account_type = set([t.strip() for t in account_type])
@@ -71,6 +71,14 @@ class TaxableRoot(object):
             self.rates = taxing_entity.rate_schedule(for_entity=self)
 
             self.add_account(taxing_entity.accounts['general'], name=taxing_entity.name)
+
+
+    def __getitem__(self, idx):
+
+        if type(idx) == str:
+            return self.accounts[idx].grid
+
+        return super().__getitem__(idx)
 
 
     @property
@@ -132,6 +140,17 @@ class TaxingEntity(TaxableRoot):
 
             return df
 
+        @property
+        def max_child_care(self):
+
+            df = pd.DataFrame([
+                5000
+            ], columns=['amount'])
+
+            df.index = ['total']
+
+            return df
+
 
         @property
         def federal(self):
@@ -161,19 +180,18 @@ class TaxingEntity(TaxableRoot):
 
 
         @property
-        def ssi(self):
+        def ssi_employer(self):
 
-            if self.marital_status=='single':
-                return pd.DataFrame([
-                    [0,       142800,    6.2],
-                    [142800,  999999999, 0.0],
-                ], columns=['start', 'end', 'rate'])
+            return pd.DataFrame([
+                [0,       142800,    6.2],
+                [142800,  999999999, 0.0],
+            ], columns=['start', 'end', 'rate'])
 
-            if self.marital_status=='married':
-                return pd.DataFrame([
-                    [0,       142800,    6.2],
-                    [142800,  999999999, 0.0],
-                ], columns=['start', 'end', 'rate'])
+
+        @property
+        def ssi_employee(self):
+
+            return self.ssi_employer
 
 
         @property
@@ -345,7 +363,7 @@ class Person(TaxableRoot):
             if len(pretax_acct_types-acct.account_type)!=len(pretax_acct_types):
                 accts[acct_name] = acct
 
-        return accts
+        return list(accts.values())
 
 
     @property
@@ -357,7 +375,7 @@ class Person(TaxableRoot):
             if 'retirement' in acct.account_type:
                 accts[acct_name] = acct
 
-        return accts
+        return list(accts.values())
 
 
     def highwater(self, measure, account='usa'):
@@ -408,19 +426,24 @@ class Company(TaxableRoot):
     def pay_salary(self, to, amount, _403b=0, _403b_match=0, _401k=0, _401k_match=0, child_care=0):
 
         # Employer FICA
-        employer_ssi = to.rates.apply(amount, 'ssi')
+        employer_ssi = to.rates.apply(amount, 'ssi_employer')
         employer_mc  = to.rates.apply(amount, 'medicare_employer')
-        self.transfer('general', self.accounts['usa'], employer_ssi, description='ssi', for_benefit_of=to)
+        self.transfer('general', self.accounts['usa'], employer_ssi, description='ssi_employer', for_benefit_of=to)
         self.transfer('general', self.accounts['usa'], employer_mc, description='medicare_employer', for_benefit_of=to)
 
         # Employee FICA
-        employee_ssi = employer_ssi
+        employee_ssi = to.rates.apply(amount, 'ssi_employee')
         employee_mc = to.rates.apply(amount, 'medicare_employee')
-        to.transfer('general', to.accounts['usa'], employee_ssi, description='ssi', for_benefit_of=to)
+        to.transfer('general', to.accounts['usa'], employee_ssi, description='ssi_employee', for_benefit_of=to)
         to.transfer('general', self.accounts['usa'], employee_mc, description='medicare_employee', for_benefit_of=to)
 
         # Deposit salary
         self.transfer('general', to.accounts['general'], amount, description='w2', for_benefit_of=to)
+
+
+        # Let's make sure retirement numbers make sense
+        if _403b+child_care+_401k > amount:
+            raise Exception(f"Pretax deductions of {_403b+_401k+child_care} cannot be more than salary {amount}")
 
         # Add money to 403b if any
         account_403b = to.find_account(self, '403b')
@@ -434,9 +457,10 @@ class Company(TaxableRoot):
         # 403b is poison -- it reduces the available tax space
         # for all pre-tax accounts to that of one employer space
         max_retirement = to.rates.max_401k.loc['total'].amount
-        value_403b = sum(to.find_account(None, '403b')).value
+        accounts_403b = to.find_account(None, '403b')
+        value_403b = 0 if len(accounts_403b)==0 else sum(accounts_403b).value
         if value_403b>0:
-            max_retirement -= sum(to.retirement_accounts.values()).value
+            max_retirement -= sum(to.retirement_accounts).value
 
         account_401k = to.find_account(self, '401k')
         if account_401k is not None:
@@ -448,12 +472,27 @@ class Company(TaxableRoot):
                 to.transfer('general', account_401k, _401k, description=f'401k contribution', for_benefit_of=to)
 
             if _401k_match>0:
+
+                if _401k_match>0.25*amount:
+                    raise Exception(f"401k profit match {_401k_match} cannot be more than {amount*0.25}")
+
                 self.transfer('general', account_401k, _401k_match, description=f'401k employer match', for_benefit_of=to)
 
-        account_child_care = to.find_account(self, 'child_care')
-        if account_child_care is not None:
-            if child_care>0:
-                to.transfer('general', account_child_care, child_care, description=f'Childcare FSA contribution', for_benefit_of=to)
+        # Are we maxed out on child_care
+        max_child_care = to.rates.max_child_care.loc['total'].amount
+        value_child_care = sum(to.find_account(None, 'child_care')).value
+        if value_child_care>0:
+            max_child_care -= value_child_care
+
+        if child_care>0:
+
+            if child_care>max_child_care:
+                raise Exception(f"child_care contribution {child_care} greater than max remaining child_care space {max_child_care}")
+
+            account_child_care = to.find_account(self, 'child_care')
+            if account_child_care is not None:
+                if child_care>0:
+                    to.transfer('general', account_child_care, child_care, description=f'Childcare FSA contribution', for_benefit_of=to)
 
 
     def share_profits(self, to, amount, percentage):
