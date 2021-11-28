@@ -6,6 +6,8 @@ __all__ = [
 ]
 
 import pandas as pd
+import random
+import string
 from taxit.helpers import classproperty
 
 class Account(object):
@@ -21,7 +23,7 @@ class Account(object):
 
         self.affiliated_with = affiliated_with
 
-        self.grid = pd.DataFrame([], columns=['description', 'for_benefit_of', 'cross_entity', 'cross_account', 'amount'])
+        self.grid = pd.DataFrame([], columns=['trade_id', 'description', 'instrument_type', 'for_benefit_of', 'cross_entity', 'cross_account', 'amount', 'basis'])
 
 
     @property
@@ -95,16 +97,24 @@ class TaxableRoot(object):
         self.accounts[account.name if name is None else name] = account
 
 
+    @staticmethod
+    def trade_id(size=6, chars=string.ascii_uppercase + string.digits):
+
+        return ''.join(random.choice(chars) for _ in range(size))
+
+
     def transfer(self, from_account, to, amount, description=None, for_benefit_of=None):
 
         fbo_name = None
         if for_benefit_of is not None:
             fbo_name = for_benefit_of.name
 
-        self.accounts[from_account].grid.loc[-1] = [description, fbo_name, to.affiliated_with.name, to.name,   -amount]
+        trade_id = self.trade_id()
+
+        self.accounts[from_account].grid.loc[-1] = [trade_id, description, 'cash', fbo_name, to.affiliated_with.name, to.name, -amount, abs(amount)]
         self.accounts[from_account].grid.index += 1
 
-        to.grid.loc[-1] = [description, fbo_name, self.name, from_account, amount]
+        to.grid.loc[-1] = [trade_id, description, 'cash', fbo_name, self.name, from_account, amount, abs(amount)]
         to.grid.index += 1
 
 
