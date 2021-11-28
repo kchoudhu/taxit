@@ -106,10 +106,10 @@ class TaxableRoot(object):
 
         trade_id = self.trade_id()
 
-        self.accounts[from_account].grid.loc[-1] = [trade_id, description, 'cash', fbo_name, to.affiliated_with.name, to.name, -amount, abs(amount)]
+        self.accounts[from_account].grid.loc[-1] = [trade_id, description, 'cash', fbo_name, to.affiliated_with.name, to.name, -amount, amount]
         self.accounts[from_account].grid.index += 1
 
-        to.grid.loc[-1] = [trade_id, description, 'cash', fbo_name, self.name, from_account, amount, abs(amount)]
+        to.grid.loc[-1] = [trade_id, description, 'cash', fbo_name, self.name, from_account, amount, amount]
         to.grid.index += 1
 
 
@@ -368,7 +368,7 @@ class Family(TaxableEntity):
 
     def calculate_tax(self):
 
-        print(f"{self.marital_status}")
+        print("hi!")
 
 
 class Person(TaxableEntity):
@@ -393,7 +393,8 @@ class Person(TaxableEntity):
 
     def calculate_tax(self):
 
-        print(f"{self.marital_status}")
+        if self.marital_status=='married':
+            raise Exception(f"{self.name} is married, try calculating via {self.family.name}")
 
 
     def find_account(self, affiliated_with, account_type):
@@ -403,6 +404,17 @@ class Person(TaxableEntity):
         else:
             x = [acct for acct in self.accounts.values() if (acct.affiliated_with==affiliated_with and account_type in acct.account_type)]
             return None if len(x)==0 else x[0]
+
+
+    def highwater(self, measure, account='usa'):
+
+        df = self.accounts[account].grid
+
+        df = df[(df['description']==measure) & (df['for_benefit_of']==self.name)]
+
+        # Return abs here -- we may be referring to
+        # negative flows
+        return abs(df['amount'].sum())
 
 
     @property
@@ -430,17 +442,6 @@ class Person(TaxableEntity):
                 accts[acct_name] = acct
 
         return list(accts.values())
-
-
-    def highwater(self, measure, account='usa'):
-
-        df = self.accounts[account].grid
-
-        df = df[(df['description']==measure) & (df['for_benefit_of']==self.name)]
-
-        # Return abs here -- we may be referring to
-        # negative flows
-        return abs(df['amount'].sum())
 
 
 class Company(TaxableEntity):
@@ -554,11 +555,14 @@ class Company(TaxableEntity):
                     to.transfer('general', account_child_care, child_care, description=f'Childcare FSA contribution', for_benefit_of=to)
 
 
-    def share_profits(self, to, amount, percentage):
+    def disburse_profits(self):
+        """
+        Disburse profits to owners
+        """
 
-        pass
+        # Expenses
+        net_profit = self.accounts['general'].value
 
-
-    def pay_dividends(self):
-
-        pass
+        # Carry out split
+        for owner, pct in self.ownership.items():
+            self.transfer('general', owner.accounts['general'], net_profit*pct/100, description='k1', for_benefit_of=owner)
