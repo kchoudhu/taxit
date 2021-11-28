@@ -23,7 +23,7 @@ class Account(object):
 
         self.affiliated_with = affiliated_with
 
-        self.grid = pd.DataFrame([], columns=['trade_id', 'description', 'instrument_type', 'for_benefit_of', 'cross_entity', 'cross_account', 'amount', 'basis'])
+        self.grid = pd.DataFrame([], columns=['trade_id', 'description', 'instrument', 'for_benefit_of', 'cross_entity', 'cross_account', 'amount', 'basis'])
 
 
     @property
@@ -60,19 +60,13 @@ class Account(object):
 
 class TaxableRoot(object):
 
-    def __init__(self, name, taxed_by):
+    def __init__(self, name):
 
         self.name = name
 
         self.accounts = {}
 
         self.add_account('general')
-
-        for taxing_entity in taxed_by:
-
-            self.rates = taxing_entity.rate_schedule(for_entity=self)
-
-            self.add_account(taxing_entity.accounts['general'], name=taxing_entity.name)
 
 
     def __getitem__(self, idx):
@@ -83,8 +77,9 @@ class TaxableRoot(object):
         return super().__getitem__(idx)
 
 
-    @property
-    def marital_status(self): return 'single'
+    def __repr__(self):
+
+        return f"<{self.__module__}.{self.__class__.__name__} at {hex(id(self))}: {self.name}>"
 
 
     def add_account(self, account, name=None, account_type=[], affiliated_with=None, generate_name=False):
@@ -277,21 +272,53 @@ class TaxingEntity(TaxableRoot):
 
     def __init__(self, jurisdiction):
 
-        super().__init__(jurisdiction, [])
+        super().__init__(jurisdiction)
 
         self.rate_schedule = {
             'usa' : self.US_Rates
         }[jurisdiction]
 
-        self.rates = self.rate_schedule()
+
+class TaxableEntity(TaxableRoot):
 
 
-    def __repr__(self):
+    def __init__(self, name, taxed_by):
 
-        return f"<{self.__module__}.{self.__class__.__name__} at {hex(id(self))}: {self.name}>"
+        super().__init__(name)
+
+        self._rates = {}
+
+        self._marital_status = 'single'
+
+        for taxing_entity in taxed_by:
+
+            self._rates[taxing_entity.name] = taxing_entity.rate_schedule
+
+            self.add_account(taxing_entity.accounts['general'], name=taxing_entity.name)
 
 
-class Family(TaxableRoot):
+    @property
+    def marital_status(self): return self._marital_status
+
+
+
+    @marital_status.setter
+    def marital_status(self, marital_status):
+
+        self._marital_status = marital_status
+
+
+    def rates(self, jurisdiction):
+
+        return self._rates[jurisdiction](for_entity=self)
+
+
+    def calculate_tax(self):
+
+        raise NotImplementedError("Implement in deriving classes")
+
+
+class Family(TaxableEntity):
 
     def __init__(self, name, taxed_by=[]):
 
@@ -301,9 +328,17 @@ class Family(TaxableRoot):
         super().__init__(name, taxed_by)
 
 
-    def __repr__(self):
+    @property
+    def marital_status(self):
 
-        return f"<{self.__module__}.{self.__class__.__name__} at {hex(id(self))}: {self.name}>"
+        if self._marital_status=='single':
+            return {
+                0: 'single',
+                1: 'head_of_household',
+                2: 'married'
+            }[len(self.parents)]
+        else:
+            return self._marital_status
 
 
     @property
@@ -317,7 +352,8 @@ class Family(TaxableRoot):
         if parent.name not in self.parents:
             self.parents[parent.name] = parent
 
-        parent.martial_status = 'married'
+        for parent in self.parents.values():
+            parent.marital_status=self.marital_status
 
         return self
 
@@ -330,7 +366,12 @@ class Family(TaxableRoot):
         return self
 
 
-class Person(TaxableRoot):
+    def calculate_tax(self):
+
+        print(f"{self.marital_status}")
+
+
+class Person(TaxableEntity):
 
     def __init__(self, name, family=None, is_child=False, taxed_by=[], f_eie=False, f_housing=False):
 
@@ -340,6 +381,9 @@ class Person(TaxableRoot):
         self.f_housing = f_housing
 
         self.is_child = is_child
+
+        self.family = family
+
         if family is not None:
             if is_child is True:
                 family.add_child(self)
@@ -347,9 +391,9 @@ class Person(TaxableRoot):
                 family.add_parent(self)
 
 
-    def __repr__(self):
+    def calculate_tax(self):
 
-        return f"<{self.__class__.__module__}.{self.__class__.__name__} at {hex(id(self))}: {self.name}>"
+        print(f"{self.marital_status}")
 
 
     def find_account(self, affiliated_with, account_type):
@@ -399,7 +443,7 @@ class Person(TaxableRoot):
         return abs(df['amount'].sum())
 
 
-class Company(TaxableRoot):
+class Company(TaxableEntity):
 
     def __init__(self, name, taxed_by=[], owned_by={}):
 
@@ -409,9 +453,12 @@ class Company(TaxableRoot):
         self.employees = {}
 
 
-    def __repr__(self):
+    def calculate_tax(self):
 
-        return f"<{self.__class__.__module__}.{self.__class__.__name__} at {hex(id(self))}: {self.name}>"
+        # We only support passthrough entities right now, so
+        # do nothing
+
+        return
 
 
     def employs(self, person, _403b=False, _401k=False, child_care=False):
@@ -435,15 +482,17 @@ class Company(TaxableRoot):
 
     def pay_salary(self, to, amount, _403b=0, _403b_match=0, _401k=0, _401k_match=0, child_care=0):
 
+        rates = to.rates('usa')
+
         # Employer FICA
-        employer_ssi = to.rates.apply(amount, 'ssi_employer')
-        employer_mc  = to.rates.apply(amount, 'medicare_employer')
+        employer_ssi = rates.apply(amount, 'ssi_employer')
+        employer_mc  = rates.apply(amount, 'medicare_employer')
         self.transfer('general', self.accounts['usa'], employer_ssi, description='ssi_employer', for_benefit_of=to)
         self.transfer('general', self.accounts['usa'], employer_mc, description='medicare_employer', for_benefit_of=to)
 
         # Employee FICA
-        employee_ssi = to.rates.apply(amount, 'ssi_employee')
-        employee_mc = to.rates.apply(amount, 'medicare_employee')
+        employee_ssi = rates.apply(amount, 'ssi_employee')
+        employee_mc = rates.apply(amount, 'medicare_employee')
         to.transfer('general', to.accounts['usa'], employee_ssi, description='ssi_employee', for_benefit_of=to)
         to.transfer('general', self.accounts['usa'], employee_mc, description='medicare_employee', for_benefit_of=to)
 
@@ -466,7 +515,7 @@ class Company(TaxableRoot):
 
         # 403b is poison -- it reduces the available tax space
         # for all pre-tax accounts to that of one employer space
-        max_retirement = to.rates.max_401k.loc['total'].amount
+        max_retirement = rates.max_401k.loc['total'].amount
         accounts_403b = to.find_account(None, '403b')
         value_403b = 0 if len(accounts_403b)==0 else sum(accounts_403b).value
         if value_403b>0:
@@ -489,7 +538,7 @@ class Company(TaxableRoot):
                 self.transfer('general', account_401k, _401k_match, description=f'401k employer match', for_benefit_of=to)
 
         # Are we maxed out on child_care
-        max_child_care = to.rates.max_child_care.loc['total'].amount
+        max_child_care = rates.max_child_care.loc['total'].amount
         value_child_care = sum(to.find_account(None, 'child_care')).value
         if value_child_care>0:
             max_child_care -= value_child_care
